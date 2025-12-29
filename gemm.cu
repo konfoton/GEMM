@@ -58,8 +58,8 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     half* start_block_x = B + block_x * shared_mem_n;
     half* start_block_y = A + block_y * shared_mem_m * SIZE_K;
 
-    int start_warp_x = warp_x * 64 / 2;
-    int start_warp_y = warp_y * 64 * 64;
+    int start_warp_x = warp_x * 64 / 2; // shared mem perspective
+    int start_warp_y = warp_y * 64 * 64 / 2; // shared mem perspective
     float* start_block_x_f32 = reinterpret_cast<float*>(start_block_x);
     float* start_block_y_f32 = reinterpret_cast<float*>(start_block_y);
 
@@ -151,8 +151,8 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     uint32_t* output = reinterpret_cast<uint32_t*>(C + final_offset);
     for(int i = 0; i < mma_tiles_per_warp_m; i++){
          for(int j = 0; j < mma_tiles_per_warp_n; j++){
-            output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + j * mma_k / 2 + (lane_id % 4)] = CD_register[i][j][0];
-            output[i * mma_m * SIZE_N / 2 + 8 * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2  + j * mma_k / 2 + (lane_id % 4)] = CD_register[i][j][1];
+            output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + j * mma_n / 2 + (lane_id % 4)] = CD_register[i][j][0];
+            output[i * mma_m * SIZE_N / 2 + 8 * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2  + j * mma_n / 2 + (lane_id % 4)] = CD_register[i][j][1];
          }
     }
     
