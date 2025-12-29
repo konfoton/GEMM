@@ -152,7 +152,7 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     for(int i = 0; i < mma_tiles_per_warp_m; i++){
          for(int j = 0; j < mma_tiles_per_warp_n; j++){
             output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + j * mma_k / 2 + (lane_id % 4)] = CD_register[i][j][0];
-            output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + 8 + j * mma_k / 2 + (lane_id % 4)] = CD_register[i][j][1];
+            output[i * mma_m * SIZE_N / 2 + 8 * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2  + j * mma_k / 2 + (lane_id % 4)] = CD_register[i][j][1];
          }
     }
     
