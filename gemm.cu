@@ -17,7 +17,7 @@ const int mma_m = 16;
 const int mma_n = 8;
 const int mma_k = 16;
 const int iter_within_global = SIZE_K / shared_mem_k;
-const int iter_within_shared = shared_mem_k / mma_k;
+const int iter_within_shared = shared_mem_k / register_file_k;
 
 const int mma_tiles_per_warp_m = register_file_m / mma_m;
 const int mma_tiles_per_warp_k = register_file_k / mma_k;
@@ -30,7 +30,7 @@ __device__ inline int swizzle_A(int logical_flattened){
             int row = (logical_flattened / 32) % 8;
             int col = (logical_flattened % 32) / 4;
             int new_col = row ^ col;
-            return old_row * 32 + new_col + small_shift;
+            return old_row * 32 + new_col * 4 + small_shift;
 }           
 __device__ inline int swizzle_B(int logical_flattened){
             int old_row = logical_flattened / 64;
@@ -40,7 +40,7 @@ __device__ inline int swizzle_B(int logical_flattened){
             int row = (logical_flattened / 64) % 8;
             int col = (logical_flattened % 32) / 4;
             int new_col = row ^ col;
-            return shared_mem_m * shared_mem_k / 2 + old_row * 64 + new_col + shift_col * 32 + small_shift;
+            return shared_mem_m * shared_mem_k / 2 + old_row * 64 + new_col * 4 + shift_col * 32 + small_shift;
 }
 
 __global__ void gemm_kernel(half* A, half* B, half* C) {
@@ -76,13 +76,13 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
         for(int i = 0; i < shared_mem_m * shared_mem_k / 2; i += blockDim.x){
             int old_row = i / 32;
             int old_col = i % 32;
-            shmem_f32[swizzle_A(i)] = start_block_x_f32[old_row * SIZE_M / 2 + old_col + iter_global * SIZE_K];
+            shmem_f32[swizzle_A(i)] = start_block_y_f32[old_row * SIZE_M / 2 + old_col + iter_global * SIZE_K / 2];
         } 
         // load B swizzeld from global memory to shared memory
         for(int i = 0; i < shared_mem_k * shared_mem_n / 2; i += blockDim.x){
             int old_row = i / 64;
-            int old_col = i % 32;
-            shmem_f32[swizzle_B(i)] = start_block_y_f32[old_row * SIZE_N / 2 + old_col + iter_global * SIZE_K * SIZE_N / 2];
+            int old_col = i % 64;
+            shmem_f32[swizzle_B(i)] = start_block_x_f32[old_row * SIZE_N / 2 + old_col + iter_global * shared_mem_k * SIZE_N / 2];
         } 
         __syncthreads();
 
@@ -105,9 +105,10 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
             // Load B from shared memory to register
             for(int i = 0; i < mma_tiles_per_warp_n; i++){
                 for(int j = 0; j < mma_tiles_per_warp_k; j++){
-                    int row = threadIdx.x;
-                    int flattened_row = i * 16 * 64 + row * 64 + j * 4 + start_warp_x + iter_shared * 32 * 64;
-                    uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + swizzle_B(flattened_row));
+                    int row = threadIdx.x % 16;
+                    int flattened_row = j * 16 * 64 + row * 64 + i * 4 + start_warp_x + iter_shared * 32 * 64;
+                    int new_col = swizzle_B(flattened_row);
+                    uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + new_col);
                     asm volatile("ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16"
                                 "{%0, %1}, [%2];"
                                 : "=r"(B_register[i][j][0]), "=r"(B_register[i][j][1])
