@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include <rand>
+#include <stdint.h>
 #include <cuda_fp16.h>
 #include <mma.h>
 const int SIZE_M = 8192;
@@ -43,7 +43,7 @@ __device__ inline int swizzle_B(int logical_flattened){
             return shared_mem_m * shared_mem_k / 2 + old_row * 64 + new_col + shift_col * 32 + small_shift;
 }
 
-__global__ void gemm_kernel(const half* A, const half* B, half* C) {
+__global__ void gemm_kernel(half* A, half* B, half* C) {
 
     int warp_id = threadIdx.x / 32;
     int lane_id = threadIdx.x % 32;
@@ -58,7 +58,7 @@ __global__ void gemm_kernel(const half* A, const half* B, half* C) {
     int start_warp_x = warp_x * 64 / 2;
     int start_warp_y = warp_y * 64 * 64 / 2;
     float* start_block_x_f32 = reinterpret_cast<float*>(start_block_x);
-    float* start_block_y_f32 = reinterpret_cast<float*>(start_block_x);
+    float* start_block_y_f32 = reinterpret_cast<float*>(start_block_y);
 
     __shared__ half shmem[shared_mem_m * shared_mem_k + shared_mem_k * shared_mem_n];
     float* shmem_f32 = reinterpret_cast<float*>(shmem);
@@ -91,13 +91,13 @@ __global__ void gemm_kernel(const half* A, const half* B, half* C) {
             // Load A from shared memory to register
             for(int i = 0; i < mma_tiles_per_warp_m; i++){
                 for(int j = 0; j < mma_tiles_per_warp_k; j++){
-                    int row = threadId.x % 16;
-                    int col = threadId.x / 16;
+                    int row = threadIdx.x % 16;
+                    int col = threadIdx.x / 16;
                     int flattened_row = i * 16 * 32 + row * 32 + j * 8 + start_warp_y + iter_shared * 16 + col * 4;
-                    uint32_t smem_ptr = __cvta_generic_to_shared(siwizzle_A(flattened_row));
-                    asm volatile("ldmatrix.sync.aligned.x4.m8n8.shared.f16"
+                    uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + swizzle_A(flattened_row));
+                    asm volatile("ldmatrix.sync.aligned.x4.m8n8.shared.b16"
                                 "{%0, %1, %2, %3}, [%4];"
-                                : "=r"(A_register[i][j][0]), "=r"(A_register[i][j][1]), "=r"(A_register[i][j][2]), "=r"(A_register[i][j][4])
+                                : "=r"(A_register[i][j][0]), "=r"(A_register[i][j][1]), "=r"(A_register[i][j][2]), "=r"(A_register[i][j][3])
                                 : "r"(smem_ptr));
                 }
             }
@@ -105,11 +105,11 @@ __global__ void gemm_kernel(const half* A, const half* B, half* C) {
             // Load B from shared memory to register
             for(int i = 0; i < mma_tiles_per_warp_n; i++){
                 for(int j = 0; j < mma_tiles_per_warp_k; j++){
-                    int row = threadId.x;
+                    int row = threadIdx.x;
                     int flattened_row = i * 16 * 64 + row * 64 + j * 4 + start_warp_x + iter_shared * 32 * 64;
-                    uint32_t smem_ptr = __cvta_generic_to_shared(siwizzle_B(flattened_row));
-                    asm volatile("ldmatrix.sync.aligned.x2.trans.m8n8.shared.f16"
-                                "{%0, %1, %2, %3}, [%4];"
+                    uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + swizzle_B(flattened_row));
+                    asm volatile("ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16"
+                                "{%0, %1}, [%2];"
                                 : "=r"(B_register[i][j][0]), "=r"(B_register[i][j][1])
                                 : "r"(smem_ptr));
                 }
@@ -121,12 +121,12 @@ __global__ void gemm_kernel(const half* A, const half* B, half* C) {
                     for(int k = 0; k < mma_tiles_per_warp_k; k++){
                         asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
                                     " { %0, %1}, "
-                                    " { %4, %5, %6, %7 }, "
-                                    " { %8, %9 }, "
-                                    " { %10, %11}; "
-                                    : "=r"(CD_register[i][j][0]), "=r"(CD_registerp[i][j][1])
+                                    " { %2, %3, %4, %5 }, "
+                                    " { %6, %7 }, "
+                                    " { %8, %9}; "
+                                    : "=r"(CD_register[i][j][0]), "=r"(CD_register[i][j][1])
                                     : "r"(A_register[i][k][0]), "r"(A_register[i][k][1]), "r"(A_register[i][k][2]), "r"(A_register[i][k][3]), "r"(B_register[k][j][0]), "r"(B_register[k][j][1]),
-                                        "r"(CD_registerp[i][j][0]), "r"(CD_registerp[i][j][1]));
+                                        "r"(CD_register[i][j][0]), "r"(CD_register[i][j][1]));
 
                     }
             }
@@ -139,7 +139,7 @@ __global__ void gemm_kernel(const half* A, const half* B, half* C) {
     int offset_block = block_y * shared_mem_m * SIZE_N + shared_mem_n * block_x;
     int offset_warp = warp_y * register_file_m * SIZE_N + warp_x * 64;
     int final_offset = offset_block + offset_warp;
-    uint32_t* output = reinterpret_cast<uint32_t*>(C + final_offset)
+    uint32_t* output = reinterpret_cast<uint32_t*>(C + final_offset);
     for(int i = 0; i < mma_tiles_per_warp_m; i++){
          for(int j = 0; j < mma_tiles_per_warp_n; j++){
             output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + j * mma_k / 2 + (lane_id % 4)] = CD_register[i][j][0];
@@ -158,7 +158,7 @@ int main(){
     dim3 block(number_of_warps * 32);
     dim3 grid((SIZE_N + shared_mem_n - 1) / shared_mem_n, (SIZE_M + shared_mem_m - 1) / shared_mem_m);
 
-    gemm_kernel<<<grid, block>>>(A, B, C, SIZE_M, SIZE_N, SIZE_K);
+    gemm_kernel<<<grid, block>>>(A, B, C);
     cudaDeviceSynchronize();
     return 0;
 }
