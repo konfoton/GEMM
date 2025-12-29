@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <cuda_fp16.h>
 #include <mma.h>
+#include <cublas_v2.h>
+#include <cstdlib>
+#include <cmath>
 const int SIZE_M = 8192;
 const int SIZE_N = 8192;
 const int SIZE_K = 8192;
@@ -67,19 +70,24 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     uint32_t B_register[mma_tiles_per_warp_k][mma_tiles_per_warp_n][2];
     uint32_t CD_register[mma_tiles_per_warp_m][mma_tiles_per_warp_n][2];
 
+    // Initialize CD_register to zero
+    for(int i = 0; i < mma_tiles_per_warp_m; i++){
+        for(int j = 0; j < mma_tiles_per_warp_n; j++){
+            CD_register[i][j][0] = 0;
+            CD_register[i][j][1] = 0;
+        }
+    }
 
-    float* A_float = reinterpret_cast<float*>(start_block_x);
-    float* B_float = reinterpret_cast<float*>(start_block_y);
     for(int iter_global = 0; iter_global < iter_within_global; iter_global++){
 
         // load A swizzed from global memory to shared memory
-        for(int i = 0; i < shared_mem_m * shared_mem_k / 2; i += blockDim.x){
+        for(int i = threadIdx.x; i < shared_mem_m * shared_mem_k / 2; i += blockDim.x){
             int old_row = i / 32;
             int old_col = i % 32;
-            shmem_f32[swizzle_A(i)] = start_block_y_f32[old_row * SIZE_M / 2 + old_col + iter_global * SIZE_K / 2];
+            shmem_f32[swizzle_A(i)] = start_block_y_f32[old_row * SIZE_K / 2 + old_col + iter_global * shared_mem_k / 2];
         } 
         // load B swizzeld from global memory to shared memory
-        for(int i = 0; i < shared_mem_k * shared_mem_n / 2; i += blockDim.x){
+        for(int i = threadIdx.x; i < shared_mem_k * shared_mem_n / 2; i += blockDim.x){
             int old_row = i / 64;
             int old_col = i % 64;
             shmem_f32[swizzle_B(i)] = start_block_x_f32[old_row * SIZE_N / 2 + old_col + iter_global * shared_mem_k * SIZE_N / 2];
@@ -91,8 +99,8 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
             // Load A from shared memory to register
             for(int i = 0; i < mma_tiles_per_warp_m; i++){
                 for(int j = 0; j < mma_tiles_per_warp_k; j++){
-                    int row = threadIdx.x % 16;
-                    int col = threadIdx.x / 16;
+                    int row = lane_id % 16;
+                    int col = lane_id / 16;
                     int flattened_row = i * 16 * 32 + row * 32 + j * 8 + start_warp_y + iter_shared * 16 + col * 4;
                     uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + swizzle_A(flattened_row));
                     asm volatile("ldmatrix.sync.aligned.x4.m8n8.shared.b16"
@@ -105,13 +113,13 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
             // Load B from shared memory to register
             for(int i = 0; i < mma_tiles_per_warp_n; i++){
                 for(int j = 0; j < mma_tiles_per_warp_k; j++){
-                    int row = threadIdx.x % 16;
+                    int row = lane_id % 16;
                     int flattened_row = j * 16 * 64 + row * 64 + i * 4 + start_warp_x + iter_shared * 32 * 64;
                     int new_col = swizzle_B(flattened_row);
                     uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + new_col);
                     asm volatile("ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16"
                                 "{%0, %1}, [%2];"
-                                : "=r"(B_register[i][j][0]), "=r"(B_register[i][j][1])
+                                : "=r"(B_register[j][i][0]), "=r"(B_register[j][i][1])
                                 : "r"(smem_ptr));
                 }
             }
@@ -150,16 +158,155 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     
 }
 
-int main(){
-    half* A, * B, * C;
-    cudaMalloc(&A, SIZE_M * SIZE_K * sizeof(half));
-    cudaMalloc(&B, SIZE_K * SIZE_N * sizeof(half));
-    cudaMalloc(&C, SIZE_M * SIZE_N * sizeof(half));
+// Initialize matrix with random values
+void init_matrix(half* h_mat, int rows, int cols) {
+    for (int i = 0; i < rows * cols; i++) {
+        h_mat[i] = __float2half((float)(rand() % 10) / 10.0f - 0.5f);
+    }
+}
 
+// Compare two matrices and return max error
+float compare_matrices(half* h_C, half* h_C_ref, int rows, int cols) {
+    float max_error = 0.0f;
+    int error_count = 0;
+    float total_error = 0.0f;
+    
+    for (int i = 0; i < rows * cols; i++) {
+        float val = __half2float(h_C[i]);
+        float ref = __half2float(h_C_ref[i]);
+        float error = fabs(val - ref);
+        float rel_error = (fabs(ref) > 1e-6f) ? error / fabs(ref) : error;
+        
+        total_error += error;
+        if (error > max_error) {
+            max_error = error;
+        }
+        
+        // Count significant errors (relative error > 1% or absolute error > 0.1)
+        if (rel_error > 0.01f && error > 0.1f) {
+            error_count++;
+            if (error_count <= 10) {
+                printf("Error at index %d (row=%d, col=%d): got %f, expected %f, diff=%f\n",
+                       i, i / cols, i % cols, val, ref, error);
+            }
+        }
+    }
+    
+    printf("Total elements: %d\n", rows * cols);
+    printf("Elements with significant error: %d (%.4f%%)\n", error_count, 100.0f * error_count / (rows * cols));
+    printf("Max absolute error: %f\n", max_error);
+    printf("Average absolute error: %f\n", total_error / (rows * cols));
+    
+    return max_error;
+}
+
+int main(){
+    // Allocate host memory
+    half *h_A, *h_B, *h_C, *h_C_ref;
+    h_A = (half*)malloc(SIZE_M * SIZE_K * sizeof(half));
+    h_B = (half*)malloc(SIZE_K * SIZE_N * sizeof(half));
+    h_C = (half*)malloc(SIZE_M * SIZE_N * sizeof(half));
+    h_C_ref = (half*)malloc(SIZE_M * SIZE_N * sizeof(half));
+    
+    // Initialize matrices with random values
+    srand(42);
+    init_matrix(h_A, SIZE_M, SIZE_K);
+    init_matrix(h_B, SIZE_K, SIZE_N);
+    
+    // Allocate device memory
+    half *d_A, *d_B, *d_C, *d_C_ref;
+    cudaMalloc(&d_A, SIZE_M * SIZE_K * sizeof(half));
+    cudaMalloc(&d_B, SIZE_K * SIZE_N * sizeof(half));
+    cudaMalloc(&d_C, SIZE_M * SIZE_N * sizeof(half));
+    cudaMalloc(&d_C_ref, SIZE_M * SIZE_N * sizeof(half));
+    
+    // Copy input matrices to device
+    cudaMemcpy(d_A, h_A, SIZE_M * SIZE_K * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, SIZE_K * SIZE_N * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_C, 0, SIZE_M * SIZE_N * sizeof(half));
+    cudaMemset(d_C_ref, 0, SIZE_M * SIZE_N * sizeof(half));
+    
+    // ==================== cuBLAS Reference ====================
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    
+    half alpha = __float2half(1.0f);
+    half beta = __float2half(0.0f);
+    
+    // For row-major matrices A(M,K), B(K,N), C(M,N):
+    // We call cublasHgemm with: C^T = B^T * A^T
+    cublasHgemm(handle, 
+                CUBLAS_OP_N, CUBLAS_OP_N,
+                SIZE_N, SIZE_M, SIZE_K,
+                &alpha,
+                d_B, SIZE_N,
+                d_A, SIZE_K,
+                &beta,
+                d_C_ref, SIZE_N);
+    
+    cudaDeviceSynchronize();
+    
+    // ==================== Custom Kernel ====================
     dim3 block(number_of_warps * 32);
     dim3 grid((SIZE_N + shared_mem_n - 1) / shared_mem_n, (SIZE_M + shared_mem_m - 1) / shared_mem_m);
-
-    gemm_kernel<<<grid, block>>>(A, B, C);
+    
+    printf("Grid: (%d, %d), Block: %d\n", grid.x, grid.y, block.x);
+    
+    // Warmup
+    gemm_kernel<<<grid, block>>>(d_A, d_B, d_C);
     cudaDeviceSynchronize();
+    
+    // Reset C and run again for timing
+    cudaMemset(d_C, 0, SIZE_M * SIZE_N * sizeof(half));
+    
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    cudaEventRecord(start);
+    gemm_kernel<<<grid, block>>>(d_A, d_B, d_C);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float ms = 0;
+    cudaEventElapsedTime(&ms, start, stop);
+    
+    // Calculate TFLOPS
+    double flops = 2.0 * SIZE_M * SIZE_N * SIZE_K;
+    double tflops = flops / (ms / 1000.0) / 1e12;
+    printf("Custom kernel time: %.3f ms\n", ms);
+    printf("Custom kernel performance: %.2f TFLOPS\n", tflops);
+    
+    // ==================== Validation ====================
+    // Copy results back to host
+    cudaMemcpy(h_C, d_C, SIZE_M * SIZE_N * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_C_ref, d_C_ref, SIZE_M * SIZE_N * sizeof(half), cudaMemcpyDeviceToHost);
+    
+    printf("\n==================== Validation ====================\n");
+    float max_error = compare_matrices(h_C, h_C_ref, SIZE_M, SIZE_N);
+    
+    // FP16 tolerance check
+    float tolerance = 1.0f;
+    if (max_error < tolerance) {
+        printf("\n✓ PASSED: Results match within tolerance (%.2f)\n", tolerance);
+    } else {
+        printf("\n✗ FAILED: Results differ beyond tolerance (%.2f)\n", tolerance);
+    }
+    
+    // Cleanup
+    cublasDestroy(handle);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    cudaFree(d_C_ref);
+    
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    free(h_C_ref);
+    
     return 0;
 }
