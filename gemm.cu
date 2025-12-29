@@ -56,10 +56,10 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     int block_y = blockIdx.y;
 
     half* start_block_x = B + block_x * shared_mem_n;
-    half* start_block_y = A + block_y * shared_mem_m * SIZE_M;
+    half* start_block_y = A + block_y * shared_mem_m * SIZE_K;
 
     int start_warp_x = warp_x * 64 / 2;
-    int start_warp_y = warp_y * 64 * 64 / 2;
+    int start_warp_y = warp_y * 64 * 64;
     float* start_block_x_f32 = reinterpret_cast<float*>(start_block_x);
     float* start_block_y_f32 = reinterpret_cast<float*>(start_block_y);
 
