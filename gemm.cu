@@ -71,33 +71,42 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     uint32_t CD_register[mma_tiles_per_warp_m][mma_tiles_per_warp_n][2];
 
     // Initialize CD_register to zero
+    #pragma unroll
     for(int i = 0; i < mma_tiles_per_warp_m; i++){
+
+        #pragma unroll
         for(int j = 0; j < mma_tiles_per_warp_n; j++){
             CD_register[i][j][0] = 0;
             CD_register[i][j][1] = 0;
         }
     }
 
+    #pragma unroll
     for(int iter_global = 0; iter_global < iter_within_global; iter_global++){
 
         // load A swizzed from global memory to shared memory
+        #pragma unroll
         for(int i = threadIdx.x; i < shared_mem_m * shared_mem_k / 2; i += blockDim.x){
             int old_row = i / 32;
             int old_col = i % 32;
             shmem_f32[swizzle_A(i)] = start_block_y_f32[old_row * SIZE_K / 2 + old_col + iter_global * shared_mem_k / 2];
         } 
         // load B swizzeld from global memory to shared memory
+        #pragma unroll
         for(int i = threadIdx.x; i < shared_mem_k * shared_mem_n / 2; i += blockDim.x){
             int old_row = i / 64;
             int old_col = i % 64;
             shmem_f32[swizzle_B(i)] = start_block_x_f32[old_row * SIZE_N / 2 + old_col + iter_global * shared_mem_k * SIZE_N / 2];
         } 
         __syncthreads();
-
+        #pragma unroll
         for(int iter_shared = 0; iter_shared < iter_within_shared; iter_shared++){
 
             // Load A from shared memory to register
+            #pragma unroll
             for(int i = 0; i < mma_tiles_per_warp_m; i++){
+
+                #pragma unroll
                 for(int j = 0; j < mma_tiles_per_warp_k; j++){
                     int row = lane_id % 16;
                     int col = lane_id / 16;
@@ -111,7 +120,10 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
             }
 
             // Load B from shared memory to register
+            #pragma unroll
             for(int i = 0; i < mma_tiles_per_warp_n; i++){
+
+                #pragma unroll
                 for(int j = 0; j < mma_tiles_per_warp_k; j++){
                     int row = lane_id % 16;
                     int flattened_row = j * 16 * 64 + row * 64 + i * 4 + start_warp_x + iter_shared * 32 * 64;
@@ -125,8 +137,13 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
             }
 
             // MMA compute
+            #pragma unroll
             for(int i = 0; i < mma_tiles_per_warp_m; i++){
+
+                #pragma unroll
                 for(int j = 0; j < mma_tiles_per_warp_n; j++){
+
+                    #pragma unroll
                     for(int k = 0; k < mma_tiles_per_warp_k; k++){
                         asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
                                     " { %0, %1}, "
@@ -149,11 +166,14 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     int offset_warp = warp_y * register_file_m * SIZE_N + warp_x * 64;
     int final_offset = offset_block + offset_warp;
     uint32_t* output = reinterpret_cast<uint32_t*>(C + final_offset);
+    #pragma unroll
     for(int i = 0; i < mma_tiles_per_warp_m; i++){
-         for(int j = 0; j < mma_tiles_per_warp_n; j++){
-            output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + j * mma_n / 2 + (lane_id % 4)] = CD_register[i][j][0];
-            output[i * mma_m * SIZE_N / 2 + 8 * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2  + j * mma_n / 2 + (lane_id % 4)] = CD_register[i][j][1];
-         }
+        
+        #pragma unroll
+        for(int j = 0; j < mma_tiles_per_warp_n; j++){
+        output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + j * mma_n / 2 + (lane_id % 4)] = CD_register[i][j][0];
+        output[i * mma_m * SIZE_N / 2 + 8 * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2  + j * mma_n / 2 + (lane_id % 4)] = CD_register[i][j][1];
+        }
     }
     
 }
