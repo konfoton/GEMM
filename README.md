@@ -40,7 +40,7 @@ This project implements a GEMM kernel from scratch using:
 ## Building
 
 ```bash
-nvcc -o gemm gemm.cu -lcublas -arch=sm_80
+nvcc -o gemm gemm.cu -lcublas -arch=sm_86
 ```
 
 ## Running
@@ -49,15 +49,9 @@ nvcc -o gemm gemm.cu -lcublas -arch=sm_80
 ./gemm
 ```
 
-## Requirements
-
-- CUDA Toolkit (tested with CUDA 11+)
-- NVIDIA GPU with Tensor Core support (sm_80+, e.g., A100, RTX 30xx)
-- cuBLAS library
-
 ## Future Optimizations
 
-- [ ] Double buffering for global memory loads
-- [ ] Software pipelining
-- [ ] Warp specialization
-- [ ] Tune tile sizes for different GPU architectures
+- Double buffering for global memory loads
+- Software pipelining
+- Warp specialization
+- Tune tile sizes for different GPU architectures
