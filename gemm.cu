@@ -28,7 +28,6 @@ const int mma_tiles_per_warp_n = register_file_n / mma_n;
 
 __device__ inline int swizzle_A(int logical_flattened){
             int old_row = logical_flattened / 32;
-            int old_col = logical_flattened % 32;
             int small_shift = logical_flattened % 4;
             int row = (logical_flattened / 32) % 8;
             int col = (logical_flattened % 32) / 4;
@@ -37,7 +36,6 @@ __device__ inline int swizzle_A(int logical_flattened){
 }           
 __device__ inline int swizzle_B(int logical_flattened){
             int old_row = logical_flattened / 64;
-            int old_col = logical_flattened % 32;
             int small_shift = logical_flattened % 4;
             int shift_col = (logical_flattened % 64) / 32;
             int row = (logical_flattened / 64) % 8;
@@ -89,15 +87,23 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
         for(int i = threadIdx.x; i < shared_mem_m * shared_mem_k / 2; i += blockDim.x){
             int old_row = i / 32;
             int old_col = i % 32;
-            shmem_f32[swizzle_A(i)] = start_block_y_f32[old_row * SIZE_K / 2 + old_col + iter_global * shared_mem_k / 2];
-        } 
+            uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + swizzle_A(i));
+            asm volatile("cp.async.ca.shared.global [%0], [%1], %2;"
+                         :
+                         : "r"(smem_ptr), "l"(start_block_y_f32 + old_row * SIZE_K / 2 + old_col + iter_global * shared_mem_k / 2), "n"(4));
+            }
         // load B swizzeld from global memory to shared memory
         #pragma unroll
         for(int i = threadIdx.x; i < shared_mem_k * shared_mem_n / 2; i += blockDim.x){
             int old_row = i / 64;
             int old_col = i % 64;
-            shmem_f32[swizzle_B(i)] = start_block_x_f32[old_row * SIZE_N / 2 + old_col + iter_global * shared_mem_k * SIZE_N / 2];
+            uint32_t smem_ptr = __cvta_generic_to_shared(shmem_f32 + swizzle_B(i));
+            asm volatile("cp.async.ca.shared.global [%0], [%1], %2;"
+                        :
+                        : "r"(smem_ptr), "l"(start_block_x_f32 + old_row * SIZE_N / 2 + old_col + iter_global * shared_mem_k * SIZE_N / 2), "n"(4));
         } 
+
+        asm volatile("cp.async.wait_all;");
         __syncthreads();
         #pragma unroll
         for(int iter_shared = 0; iter_shared < iter_within_shared; iter_shared++){
