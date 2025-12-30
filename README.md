@@ -17,7 +17,7 @@ This project implements a GEMM kernel from scratch using:
 |--------|-------|
 | Matrix Size | 8192 × 8192 × 8192 |
 | Data Type | FP16 |
-| **Custom Kernel vs cuBLAS** | **27%** |
+| **Custom Kernel vs cuBLAS** | **51%** |
 
 ## Implementation Details
 
@@ -40,7 +40,7 @@ This project implements a GEMM kernel from scratch using:
 ## Building
 
 ```bash
-nvcc -o gemm gemm.cu -lcublas -arch=sm_86
+nvcc -o gemm gemm.cu -lcublas -arch=sm_86 -O3
 ```
 
 ## Running
