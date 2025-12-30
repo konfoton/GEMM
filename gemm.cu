@@ -168,7 +168,7 @@ __global__ void gemm_kernel(half* A, half* B, half* C) {
     uint32_t* output = reinterpret_cast<uint32_t*>(C + final_offset);
     #pragma unroll
     for(int i = 0; i < mma_tiles_per_warp_m; i++){
-        
+
         #pragma unroll
         for(int j = 0; j < mma_tiles_per_warp_n; j++){
         output[i * mma_m * SIZE_N / 2 + (lane_id / 4) * SIZE_N / 2 + j * mma_n / 2 + (lane_id % 4)] = CD_register[i][j][0];
@@ -253,8 +253,7 @@ int main(){
     half alpha = __float2half(1.0f);
     half beta = __float2half(0.0f);
     
-    // For row-major matrices A(M,K), B(K,N), C(M,N):
-    // We call cublasHgemm with: C^T = B^T * A^T
+    // Warmup cuBLAS
     cublasHgemm(handle, 
                 CUBLAS_OP_N, CUBLAS_OP_N,
                 SIZE_N, SIZE_M, SIZE_K,
@@ -263,8 +262,34 @@ int main(){
                 d_A, SIZE_K,
                 &beta,
                 d_C_ref, SIZE_N);
-    
     cudaDeviceSynchronize();
+    
+    // Reset and time cuBLAS
+    cudaMemset(d_C_ref, 0, SIZE_M * SIZE_N * sizeof(half));
+    
+    cudaEvent_t cublas_start, cublas_stop;
+    cudaEventCreate(&cublas_start);
+    cudaEventCreate(&cublas_stop);
+    
+    cudaEventRecord(cublas_start);
+    cublasHgemm(handle, 
+                CUBLAS_OP_N, CUBLAS_OP_N,
+                SIZE_N, SIZE_M, SIZE_K,
+                &alpha,
+                d_B, SIZE_N,
+                d_A, SIZE_K,
+                &beta,
+                d_C_ref, SIZE_N);
+    cudaEventRecord(cublas_stop);
+    cudaEventSynchronize(cublas_stop);
+    
+    float cublas_ms = 0;
+    cudaEventElapsedTime(&cublas_ms, cublas_start, cublas_stop);
+    
+    double flops = 2.0 * SIZE_M * SIZE_N * SIZE_K;
+    double cublas_tflops = flops / (cublas_ms / 1000.0) / 1e12;
+    printf("cuBLAS time: %.3f ms\n", cublas_ms);
+    printf("cuBLAS performance: %.2f TFLOPS\n", cublas_tflops);
     
     // ==================== Custom Kernel ====================
     dim3 block(number_of_warps * 32);
@@ -292,10 +317,10 @@ int main(){
     cudaEventElapsedTime(&ms, start, stop);
     
     // Calculate TFLOPS
-    double flops = 2.0 * SIZE_M * SIZE_N * SIZE_K;
     double tflops = flops / (ms / 1000.0) / 1e12;
     printf("Custom kernel time: %.3f ms\n", ms);
     printf("Custom kernel performance: %.2f TFLOPS\n", tflops);
+    printf("Efficiency vs cuBLAS: %.1f%%\n", (cublas_ms / ms) * 100.0);
     
     // ==================== Validation ====================
     // Copy results back to host
@@ -317,6 +342,8 @@ int main(){
     cublasDestroy(handle);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
+    cudaEventDestroy(cublas_start);
+    cudaEventDestroy(cublas_stop);
     
     cudaFree(d_A);
     cudaFree(d_B);
