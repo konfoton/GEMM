@@ -29,7 +29,7 @@ const int mma_tiles_per_warp_n = register_file_n / mma_n;
 __device__ inline int swizzle_A(int logical_flattened){
             int old_row = logical_flattened / 32;
             int small_shift = logical_flattened % 4;
-            int row = (logical_flattened / 32) % 8;
+            int row = (old_row) % 8;
             int col = (logical_flattened % 32) / 4;
             int new_col = row ^ col;
             return old_row * 32 + new_col * 4 + small_shift;
@@ -38,7 +38,7 @@ __device__ inline int swizzle_B(int logical_flattened){
             int old_row = logical_flattened / 64;
             int small_shift = logical_flattened % 4;
             int shift_col = (logical_flattened % 64) / 32;
-            int row = (logical_flattened / 64) % 8;
+            int row = (old_row) % 8;
             int col = (logical_flattened % 32) / 4;
             int new_col = row ^ col;
             return shared_mem_m * shared_mem_k / 2 + old_row * 64 + new_col * 4 + shift_col * 32 + small_shift;
