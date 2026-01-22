@@ -13,11 +13,14 @@ This project implements a GEMM kernel from scratch using:
 
 ## Performance
 
-| Metric | Value |
-|--------|-------|
-| Matrix Size | 8192 × 8192 × 8192 |
-| Data Type | FP16 |
-| **Custom Kernel vs cuBLAS** | **51%** |
+Benchmarked on 8192 × 8192 × 8192 FP16 matrix multiplication:
+
+| Implementation | Time (ms) | TFLOPS |
+|----------------|-----------|--------|
+| cuBLAS | 8.166 | 134.64 |
+| Custom Kernel | 15.948 | 68.94 |
+
+**Efficiency vs cuBLAS: 51.2%**
 
 ## Implementation Details
 
